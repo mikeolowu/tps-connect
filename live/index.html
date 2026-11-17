@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="robots" content="noindex">
+<title>Connect Claude to the TPS app (live)</title>
+<!--
+  The consent page for the TPS app connector (Mike, 15 Nov). Supabase's OAuth server sends Claude's
+  sign-in here with ?authorization_id=…; a care lead or admin signs in with her TPS email and a code,
+  sees what is asking, and approves or declines. Only the LIVE project's public address and
+  publishable key are here (both are meant to be public; row-level security protects the data).
+-->
+<style>
+  :root { --cream:#F5F3EC; --ink:#073937; --muted:#5f7471; --brick:#A9463B; --line:rgba(7,57,55,.14); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--cream); color: var(--ink); font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 440px; margin: 0 auto; padding: 48px 20px; }
+  h1 { font: 600 26px/1.25 Georgia, serif; margin: 0 0 8px; }
+  p { margin: 0 0 16px; }
+  .muted { color: var(--muted); font-size: 15px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 20px; margin: 20px 0; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  input { width: 100%; font: inherit; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--ink); }
+  button { width: 100%; font: 600 17px/1 inherit; padding: 16px; border-radius: 999px; border: 0; margin-top: 12px; cursor: pointer; }
+  .primary { background: #1b1b1b; color: #fff; }
+  .secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; }
+  .error { color: var(--brick); }
+  ul { padding-left: 20px; margin: 8px 0 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connect Claude to the TPS app</h1>
+  <p class="muted" id="lead">For TPS care leads and admins.</p>
+
+  <section id="signin" hidden>
+    <div class="card">
+      <label for="email">Your TPS email</label>
+      <input id="email" type="email" autocomplete="email" inputmode="email" placeholder="you@thepostpartumsuite.com">
+      <button class="primary" id="send">Email me a code</button>
+      <div id="codeBox" hidden>
+        <label for="code" style="margin-top:16px">Code from your email</label>
+        <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10">
+        <button class="primary" id="verify">Sign in</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="consent" hidden>
+    <div class="card">
+      <p><strong id="client">Claude</strong> would like to use the TPS app as <strong id="who"></strong>.</p>
+      <p class="muted">It will be able to look up bookings, care records, menus, staff and what needs attention, read only: it can't change anything. Changes are made in the TPS app. It sees only what you can see in the app.</p>
+      <button class="primary" id="approve">Allow</button>
+      <button class="secondary" id="deny">Don't allow</button>
+    </div>
+    <p class="muted">You can disconnect at any time from Claude's connector settings.</p>
+  </section>
+
+  <p id="message" class="error" hidden></p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
+<script>
+  const SUPABASE_URL = 'https://jganeltorahjiffeayan.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_J8juUsRTLVdTgn5Oj6PFcQ_0Zpl0OU2';
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const authorizationId = new URLSearchParams(location.search).get('authorization_id');
+  const $ = (id) => document.getElementById(id);
+  const show = (id, on = true) => { $(id).hidden = !on; };
+  const fail = (text) => { $('message').textContent = text; show('message'); };
+
+  async function start() {
+    if (!authorizationId) return fail('This page opens from Claude when you add the TPS app connector.');
+    const { data } = await sb.auth.getSession();
+    if (!data.session) return show('signin');
+    await consent(data.session);
+  }
+
+  async function consent(session) {
+    show('signin', false);
+    // Care leads and admins only: checked against the staff list, as the connector itself does.
+    const { data: staff } = await sb.from('staff').select('full_name,role,active').eq('email', session.user.email.toLowerCase()).maybeSingle();
+    if (!staff || staff.active === false || !['care_lead', 'admin'].includes(staff.role)) {
+      await sb.auth.oauth.denyAuthorization(authorizationId).catch(() => null);
+      return fail('This connector is for TPS care leads and admins. Ask Mike or Ami if you need it.');
+    }
+    const { data: details, error } = await sb.auth.oauth.getAuthorizationDetails(authorizationId);
+    if (error) return fail('This sign-in link has expired. Go back to Claude and connect again.');
+    if (details && !details.authorization_id && details.redirect_url) return location.assign(details.redirect_url);
+    $('client').textContent = (details && details.client && details.client.name) || 'Claude';
+    $('who').textContent = staff.full_name || session.user.email;
+    show('consent');
+  }
+
+  $('send').onclick = async () => {
+    const email = $('email').value.trim().toLowerCase();
+    if (!email) return;
+    $('send').disabled = true;
+    const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    $('send').disabled = false;
+    if (error) return fail("Couldn't send a code to that email. Use your TPS email.");
+    show('message', false);
+    show('codeBox');
+    $('code').focus();
+  };
+
+  $('verify').onclick = async () => {
+    $('verify').disabled = true;
+    const { data, error } = await sb.auth.verifyOtp({ email: $('email').value.trim().toLowerCase(), token: $('code').value.trim(), type: 'email' });
+    $('verify').disabled = false;
+    if (error || !data.session) return fail("That code didn't work. Check it, or send a new one.");
+    show('message', false);
+    await consent(data.session);
+  };
+
+  async function decide(approve) {
+    $('approve').disabled = $('deny').disabled = true;
+    const { data, error } = approve
+      ? await sb.auth.oauth.approveAuthorization(authorizationId)
+      : await sb.auth.oauth.denyAuthorization(authorizationId);
+    if (error || !data || !data.redirect_url) {
+      $('approve').disabled = $('deny').disabled = false;
+      return fail('Something went wrong. Go back to Claude and connect again.');
+    }
+    location.assign(data.redirect_url);
+  }
+  $('approve').onclick = () => decide(true);
+  $('deny').onclick = () => decide(false);
+
+  start();
+</script>
+</body>
+</html>
